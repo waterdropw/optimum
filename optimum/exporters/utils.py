@@ -496,6 +496,80 @@ def get_speecht5_models_for_export(
 
     return models_for_export
 
+def __resize_pos_embed(posemb, new_size):
+        import math
+        import torch.nn.functional as F
+        # Get the weight of the embedding
+        posemb_weight = posemb.weight.data
+
+        # Calculate the size of the position embedding
+        orig_size = int(math.sqrt(posemb_weight.shape[0] - 1))
+
+        # Remove class token if present
+        if posemb_weight.shape[0] == (orig_size * orig_size + 1):
+            posemb_tok, posemb_grid = posemb_weight[:1], posemb_weight[1:]
+        else:
+            posemb_tok, posemb_grid = None, posemb_weight
+        # Reshape to 2D grid
+        posemb_grid = posemb_grid.unsqueeze(0).transpose(1, 2)
+        posemb_grid = posemb_grid.reshape(posemb_grid.shape[0], posemb_grid.shape[1], orig_size, orig_size)
+
+        # Interpolate
+        posemb_grid = F.interpolate(posemb_grid, size=new_size, mode='bilinear', align_corners=False)
+        # Reshape back
+        posemb_grid = posemb_grid.flatten(2).transpose(1, 2).squeeze(0)
+
+        # Add class token back if it was present
+        if posemb_tok is not None:
+            posemb_weight_new = torch.cat([posemb_tok, posemb_grid], dim=0)
+        else:
+            posemb_weight_new = posemb_grid
+        # print(f"new shape: {posemb_weight_new.shape}")
+        # Create a new embedding layer with the resized weights
+        new_posemb = torch.nn.Embedding(posemb_weight_new.shape[0], posemb_weight_new.shape[1])
+        new_posemb.weight.data.copy_(posemb_weight_new)
+
+        return new_posemb
+
+def get_owl_models_for_export(
+    model: Union["PreTrainedModel", "TFPreTrainedModel"], config: "ExportConfig", input_shapes: Optional[Dict]
+):
+    if input_shapes is not None:
+        # reset export config
+        if "OnnxConfig" in config.__class__.__name__:
+            if config._normalized_config.has_attribute("input_size"):
+                config._normalized_config.input_size = (
+                    input_shapes["num_channels"],
+                    input_shapes["height"],
+                    input_shapes["width"])
+            else:
+                if config._normalized_config.has_attribute("num_channels"):
+                    config._normalized_config.num_channels = input_shapes["num_channels"]
+                if config._normalized_config.has_attribute("image_size"):
+                    config._normalized_config.image_size = (input_shapes["width"], input_shapes["height"])
+        # reset VisionEmbeddings according to new input sizes
+        if model.config.model_type == "owlv2":
+            m = model.owlv2
+        elif model.config.model_type == "owlvit":
+            m = model.owlvit
+        image_size = input_shapes["width"]
+        sqrt_num_patches = image_size // m.vision_model.embeddings.config.patch_size
+        num_patches = sqrt_num_patches ** 2
+        num_positions = num_patches + 1
+        m.vision_model.embeddings.position_embedding = __resize_pos_embed(
+            m.vision_model.embeddings.position_embedding,
+            (sqrt_num_patches,sqrt_num_patches)
+        )
+        m.vision_model.embeddings.num_patches = num_patches
+        m.vision_model.embeddings.num_positions = num_positions
+        # recreate position_ids for the new image_size
+        del m.vision_model.embeddings.position_ids
+        m.vision_model.embeddings.register_buffer("position_ids", torch.arange(num_positions).expand((1, -1)), persistent=False)
+        model.sqrt_num_patches = sqrt_num_patches
+        model.box_bias = model.compute_box_bias(sqrt_num_patches)
+    models_and_export_configs = {"model": (model, config)}
+    return models_and_export_configs
+
 
 def override_diffusers_2_0_attn_processors(model):
     for _, submodule in model.named_modules():
@@ -534,6 +608,7 @@ def _get_submodels_and_export_configs(
     legacy: bool = False,
     model_kwargs: Optional[Dict] = None,
     exporter: str = "onnx",
+    input_shapes: Optional[Dict] = None,
 ):
     if not custom_architecture:
         if library_name == "diffusers":
@@ -574,6 +649,8 @@ def _get_submodels_and_export_configs(
                 models_and_export_configs = get_speecht5_models_for_export(model, export_config, model_kwargs)
             elif model.config.model_type == "musicgen":
                 models_and_export_configs = get_musicgen_models_for_export(model, export_config)
+            elif "owl" in model.config.model_type:
+                models_and_export_configs = get_owl_models_for_export(model, export_config, input_shapes=input_shapes)
             else:
                 models_and_export_configs = {"model": (model, export_config)}
 

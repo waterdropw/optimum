@@ -1110,6 +1110,7 @@ def onnx_export_from_model(
         legacy=legacy,
         library_name=library_name,
         model_kwargs=model_kwargs,
+        input_shapes = input_shapes,
     )
 
     if library_name != "diffusers":

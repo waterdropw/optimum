@@ -197,6 +197,7 @@ def _get_submodels_and_onnx_configs(
     preprocessors: Optional[List[Any]] = None,
     legacy: bool = False,
     model_kwargs: Optional[Dict] = None,
+    input_shapes: Optional[Dict] = None,
 ):
     return _get_submodels_and_export_configs(
         model,
@@ -213,6 +214,7 @@ def _get_submodels_and_onnx_configs(
         legacy,
         model_kwargs,
         exporter="onnx",
+        input_shapes=input_shapes,
     )
 
 
